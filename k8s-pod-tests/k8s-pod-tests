@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 set -euo pipefail
 
@@ -6,9 +6,14 @@ DIR="$( cd "$( dirname "$0" )" && pwd )"
 
 # options
 ACTION=""
+KUBECONFIG_FN=
+
+# options with a default value
 WAIT=false
 ENVIRONMENT=${CAASP_ENVIRONMENT:-$DIR/../caasp-kvm/environment.json}
-KUBECONFIG_FN=
+SCALESTEP=10
+SCALESTEP_TIMEOUT=120
+NUM_REPLICAS=20
 
 USAGE=$(cat <<USAGE
 Usage:
@@ -27,10 +32,13 @@ Usage:
 
   * Scaling up a pod
 
-    -s|--scale           <NAME> <NUM>              Set the number of replicas
-    --slowscale          <NAME> <NUM> <TIME>       Scale up to a number of replicas over an amount of time
-                                                   <TIME> is the total time in seconds
-        [-w|--wait]                                Optional: wait for replicas to be available
+    -s|--scale           <PODNAME>                 Instantly set a number of replicas for a pod
+    --slowscale          <PODNAME>                 Scale *up* to a number of replicas over time
+        --step           <NUM>                     Optional: scaleup step size (default: 10)
+        [-w|--wait]                                Optional: wait for replicas to become available
+        --step-timeout   <SECONDS>                 Timeout in seconds for each scaleup step (default: 60)
+    --numreplicas        <NUM>                     Number of replicas (used with --scale or --slowscale) (default: 20)
+
 
 * General Options
 
@@ -71,19 +79,33 @@ while [[ $# > 0 ]] ; do
       MANIFEST_FNAME="$2"
       shift
       ;;
+
     -s|--scale)
       ACTION="scale"
       NAME="$2"
-      NUM_REPLICAS="$3"
       shift
       ;;
     --slowscale)
       ACTION="slowscale"
       NAME="$2"
-      NUM_REPLICAS="$3"
-      INTERVAL="$4"
       shift
       ;;
+    --step)
+      SCALESTEP="$2"
+      shift
+      ;;
+    --step-timeout)
+      SCALESTEP_TIMEOUT="$2"
+      shift
+      ;;
+    -w|--wait)
+      WAIT=true
+      ;;
+    --numreplicas)
+      NUM_REPLICAS="$2"
+      shift
+      ;;
+
     -e|--environment)
       ENVIRONMENT="$2"
       shift
@@ -91,9 +113,6 @@ while [[ $# > 0 ]] ; do
     -k|--kubeconfig)
       KUBECONFIG_FN="$2"
       shift
-      ;;
-    -w|--wait)
-      WAIT=true
       ;;
     -h|--help)
       echo "$USAGE"
@@ -113,13 +132,18 @@ list_pods() {
 }
 
 wait_until_available_num() {
-  # Requires $NAME
-  while :
-  do
+  # Requires $target_num $timeout
+  target_num=$1
+  timeout=$2
+  for elapsed in $(seq 0 $2); do
+    echo "checking..."
     current_available_num=$( get_deployments | awk '{print $5}' )
-    [[ $current_available_num -eq "$1" ]] && return
+    [[ $current_available_num -eq "$target_num" ]] && return
+    echo "not ready yet"
     sleep 1
   done
+  echo "ERROR: $current_available_num instances running. Expected: $target_num"
+  return 1
 }
 
 create_pod() {
@@ -131,9 +155,10 @@ delete_pod() {
 }
 
 scale_pod() {
+  # set number of replicas instantly
   kubectl scale --replicas=$NUM_REPLICAS --kubeconfig="$KUBECONFIG_FN" deployment/$NAME
   [[ "$WAIT" = false ]] && return
-  wait_until_available_num $NUM_REPLICAS
+  wait_until_available_num $NUM_REPLICAS $SCALESTEP_TIMEOUT
 }
 
 get_rs() {
@@ -148,7 +173,8 @@ show_pod() {
   kubectl --kubeconfig="$KUBECONFIG_FN" get pod $NAME
 }
 
-scale_pod_in_steps() {
+scale_pod_in_steps_adaptive() {
+  # currently unused
   cycle_time=5
   eta=$(( $(date +%s) + $INTERVAL ))
   # start from the currently *available* number
@@ -165,13 +191,28 @@ scale_pod_in_steps() {
     current_num=$(( $current_num + $step ))
     echo "Setting replicas to $current_num"
     kubectl scale --replicas=$current_num --kubeconfig="$KUBECONFIG_FN" deployment/$NAME
-    [[ "$WAIT" = true ]] && wait_until_available_num $current_num && echo OK
+    [[ "$WAIT" = true ]] && wait_until_available_num $current_num 60 && echo OK
 
     [[ $current_num == $NUM_REPLICAS ]] && return
     sleep $cycle_time
 
   done
+}
 
+scale_pod_in_steps() {
+  # start from the currently *available* number
+  current_num=$( get_deployments | awk '{print $5}' )
+
+  while [[ $current_num -lt $NUM_REPLICAS ]]; do
+    new_num=$(( $current_num + $SCALESTEP ))
+    if [ $new_num -gt $NUM_REPLICAS ]; then
+      new_num=$NUM_REPLICAS
+    fi
+    echo "Setting replicas to $new_num"
+    kubectl scale --replicas=$new_num --kubeconfig="$KUBECONFIG_FN" deployment/$NAME
+    [[ "$WAIT" = true ]] && wait_until_available_num $new_num $SCALESTEP_TIMEOUT
+    current_num=$new_num
+  done
 }
 
 
