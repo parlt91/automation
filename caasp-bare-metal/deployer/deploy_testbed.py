@@ -752,7 +752,8 @@ def main():
         tsclient.release_servers(args.testname)
         return
 
-    args.tftpdir = handle_iso(args)
+    if args.tftpdir is None:
+        args.tftpdir = handle_iso(args)
     log.info("TFTP dir: %r" % args.tftpdir)
 
     if args.wipe_admin:
