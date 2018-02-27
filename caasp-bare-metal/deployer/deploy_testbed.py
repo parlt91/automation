@@ -296,9 +296,14 @@ class TestbedServiceClient():
             ))
 
     def fetch_syslog_logs(self, ipaddr, from_timestamp):
-        """Fetch Syslog logs from the last boot, for a host, up to a given timestamp
+        """Fetch Syslog logs from the last boot, for a host, from a timestamp
         """
         return self._api_get_raw('/logs/get/{}/{}'.format(ipaddr, from_timestamp))
+
+    def scan_syslog_logs(self, ipaddr, from_timestamp):
+        """Scan Syslog logs for errors from the last boot, for a host.
+        """
+        return self._api_get('/logs/scan/{}/{}'.format(ipaddr, from_timestamp))
 
 
 class RemoteHWManager(TestbedServiceClient):
@@ -428,6 +433,12 @@ def deploy_admin_node(args):
 
     log.info("Waiting for host to respond to SSH")
     while True:
+        r = tsclient.scan_syslog_logs(ipaddr, t0)
+        if r["error"]:
+            msg = "Error detected in syslog traffic: {}".format(r["error"])
+            log.error(msg)
+            raise Exception(msg)
+
         if tsclient.probe_ssh_port(ipaddr) == "open":
             break
         sleep(10)
